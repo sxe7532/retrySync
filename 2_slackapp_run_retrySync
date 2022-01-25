@@ -1,0 +1,93 @@
+# lambda_function.py
+# This function is invoked by an SNS topic
+# and invokes the directory-sync-prod-syncRunner function
+# Author: Sara Wood
+
+import json
+import requests
+import boto3
+import base64
+from botocore.exceptions import ClientError
+import time
+
+SLACK_CHANNEL_ID = "xxxxxx"
+
+HEADERS = {
+    'Accept': 'application/json',
+    'Content-type': 'application/json',
+}
+
+
+def lambda_handler(event, context):
+    data_from_slack = event["Records"][0]["Sns"]["Message"]
+
+    json_loaded_data = json.loads(data_from_slack)
+
+    response_url = json_loaded_data["response_url"]
+    channel_id = json_loaded_data["channel_id"]
+    search_string = json_loaded_data["text"]
+
+    search_handler(channel_id, search_string, response_url)
+
+
+def search_handler(channel_id, search_string, response_url):
+    response_json = {}
+
+    # Verify that the request is coming from the right slack channel
+    if (channel_id == SLACK_CHANNEL_ID):
+        runRetry(search_string, response_url)
+    else:
+        response_text = ":warning: You must use `/retry` while inside an authorized channel."
+        response_json["text"] = response_text
+        response = requests.post(
+            response_url, data=json.dumps(response_json),
+            headers={'Content-Type': 'application/json'}
+        )
+
+
+def runRetry(search_string, response_url):
+    response_json = {}
+
+    payload = {
+        "source": f"employeeSyncCLI",
+        "bamboo_id": search_string,
+        "action": "retry",
+        "response_url": response_url
+    }
+
+    payload = {**payload, **_get_caller_metadata()}
+
+    try:
+        lambda_response = boto3.client('lambda', ).invoke(
+            FunctionName='directory-sync-prod-syncRunner',
+            InvocationType='Event',
+            LogType='None',
+            Payload=bytes(json.dumps(payload), encoding='utf-8')
+        )
+
+        if lambda_response["ResponseMetadata"]["HTTPStatusCode"] != 202:
+
+            response_text = "Unable to sent this request.:sadparrot: "
+            response_json["text"] = response_text
+            response = requests.post(
+                response_url, data=json.dumps(response_json),
+                headers={'Content-Type': 'application/json'}
+            )
+
+    except Exception as ex:
+        template = "An exception of type {0} occurred. Arguments:\n{1!r}"
+        message = template.format(type(ex).__name__, ex.args)
+        print(message)
+        response_text = message
+        response_json["text"] = response_text
+        response = requests.post(
+            response_url, data=json.dumps(response_json),
+            headers={'Content-Type': 'application/json'}
+        )
+
+
+def _get_caller_metadata() -> dict:
+    """Retrieves user's ARN and returns in a dictionary"""
+    sts = boto3.client('sts')
+    identity = sts.get_caller_identity()
+    return {"callerArn": identity['Arn']}
